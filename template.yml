@@ -1,0 +1,129 @@
+# This is not a valid cloud-config.yml! Process with process-cloud-config.sh and use cloud-config.yml.
+runcmd:
+- sudo dd if=/dev/zero of=/swapfile bs=4K count=1M
+- sudo chmod 600 /swapfile
+- sudo mkswap /swapfile
+- sudo swapon /swapfile
+- sudo growpart /dev/vda 1
+- sudo resize2fs /dev/vda1
+mounts:
+- [ /swapfile, none, swap, sw, 0, 0 ]
+write_files:
+- path: /opt/volumes/registry/auth/htpasswd
+  content: |
+    ${REGISTRY_AUTH_HTPASSWD}
+    
+- path: /opt/volumes/verdaccio/verdaccio/htpasswd
+  content: |
+    ${VERDACCIO_AUTH_HTPASSWD}
+    
+- path: /opt/volumes/verdaccio/verdaccio/conf/config.yaml
+  content: |
+    storage: /verdaccio/storage
+    auth:
+      htpasswd:
+        file: /verdaccio/htpasswd
+        max_users: -1
+    uplinks:
+      npmjs:
+        url: https://registry.npmjs.org/
+    packages:
+      '@*/*':
+        access: $authenticated
+        publish: $authenticated
+        proxy: npmjs
+      '**':
+        access: $authenticated
+        publish: $authenticated
+        proxy: npmjs
+    logs:
+      - {type: stdout, format: pretty, level: http}
+
+- path: /opt/volumes/lets-nginx/templates/nginx.conf
+  content: |
+    user nginx;
+    worker_processes 2;
+    
+    events {
+      worker_connections 1024;
+    }
+    
+    http {
+      include mime.types;
+      default_type application/octet-stream;
+    
+      proxy_cache_path /var/cache/nginx keys_zone=anonymous:10m;
+      proxy_temp_path /var/tmp/nginx;
+    
+      sendfile on;
+      client_max_body_size 0;
+      proxy_http_version 1.1;
+      proxy_request_buffering off;
+      tcp_nopush on;
+      keepalive_timeout 65;
+    
+      access_log /var/log/nginx/access.log;
+      error_log /var/log/nginx/error.log;
+    
+      map $http_upgrade $connection_upgrade {
+          default upgrade;
+          ''      close;
+      }
+    
+      #Include the vhost files.
+      include vhosts/*.conf;
+    }
+
+rancher:
+  sysctl:
+    vm.swappiness: 60
+  docker:
+    engine: docker-17.12.1-ce
+  services:
+    registry:
+      image: registry:2
+      restart: always
+      ports:
+       - 5000:5000
+      volumes:
+       - /opt/volumes/registry/var/lib/registry:/var/lib/registry
+       - /opt/volumes/registry/auth:/auth
+      environment:
+        REGISTRY_HTTP_HOST: https://${REGISTRY_DOMAIN}
+        REGISTRY_AUTH_HTPASSWD_REALM: ${REGISTRY_DOMAIN}
+        REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd
+    artifactory:
+      image: docker.bintray.io/jfrog/artifactory-oss
+      restart: always
+      ports:
+       - 8081:8081
+      volumes:
+       - /opt/volumes/artifactory/var/opt/jfrog/artifactory:/var/opt/jfrog/artifactory:Z
+    verdaccio:
+      image: verdaccio/verdaccio
+      restart: always
+      ports:
+       - 4873:4873
+      volumes:
+       - /opt/volumes/verdaccio/verdaccio/htpasswd:/verdaccio/htpasswd
+       - /opt/volumes/verdaccio/verdaccio/conf:/verdaccio/conf
+       - /opt/volumes/verdaccio/verdaccio/storage:/verdaccio/storage
+    lets-nginx:
+      image: smashwilson/lets-nginx
+      restart: always
+      links:
+       - registry:registry
+       - artifactory:artifactory
+       - verdaccio:verdaccio
+      ports:
+       - 80:80
+       - 443:443
+      volumes:
+       - /opt/volumes/lets-nginx/cache:/cache
+       - /opt/volumes/lets-nginx/etc/letsencrypt:/etc/letsencrypt
+       - /opt/volumes/lets-nginx/templates/nginx.conf:/templates/nginx.conf:ro
+      environment:
+        EMAIL: ${DOMAIN_ADMIN_EMAIL}
+        DOMAIN: ${REGISTRY_DOMAIN};${ARTIFACTORY_DOMAIN};${VERDACCIO_DOMAIN}
+        UPSTREAM: registry:5000;artifactory:8081;verdaccio:4873
+        STAGING: ${STAGING}
